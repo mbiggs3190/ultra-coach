@@ -1,0 +1,183 @@
+# Phase 0 — Project Foundation
+
+> **Goal**: A clean, deployable shell on Vercel before writing any features. Every subsequent phase builds on this.
+
+-----
+
+## Checklist
+
+### Project Initialization
+
+- [ ] Initialize Next.js 14 app with TypeScript and App Router
+  
+  ```bash
+  npx create-next-app@latest es100-coach --typescript --tailwind --app --src-dir --import-alias "@/*"
+  ```
+- [ ] Install and configure ESLint with consistent rules
+- [ ] Install and configure Prettier
+- [ ] Create `.prettierrc` and `.eslintrc.json` at project root
+- [ ] Confirm `npm run lint` and `npm run build` pass clean
+
+### Folder Structure
+
+- [ ] Create feature-based folder structure:
+  
+  ```
+  /src
+    /app
+      /api
+        /strava
+          /webhook/
+          /auth/
+      /(protected)/
+        /dashboard/
+        /week/
+        /plan/
+        /settings/
+    /features
+      /strava-sync/
+      /training-plan/
+      /predicted-finish/
+      /competitive-intel/
+      /strength/
+      /heat-protocol/
+    /lib
+      /prisma/
+      /strava/
+      /types/
+      /utils/
+    /components
+      /ui/
+      /layout/
+  /prisma
+    /migrations/
+    /seed/
+  ```
+- [ ] Add a `README.md` at root with project overview and local dev instructions
+
+### Environment Variables
+
+- [ ] Create `.env.local` for local development
+- [ ] Create `.env.example` with all required keys (no values) for reference
+- [ ] Install Zod: `npm install zod`
+- [ ] Create `/src/lib/env.ts` — validates all env vars at startup using Zod, throws on missing
+  
+  ```typescript
+  // Pattern: app fails loudly if env vars are missing, not silently at runtime
+  import { z } from 'zod'
+  const envSchema = z.object({
+    DATABASE_URL: z.string().url(),
+    NEXTAUTH_SECRET: z.string().min(1),
+    NEXTAUTH_URL: z.string().url(),
+    STRAVA_CLIENT_ID: z.string().min(1),
+    STRAVA_CLIENT_SECRET: z.string().min(1),
+    STRAVA_WEBHOOK_VERIFY_TOKEN: z.string().min(1),
+  })
+  export const env = envSchema.parse(process.env)
+  ```
+- [ ] Required env vars to define now (values come in Phase 1):
+  - `DATABASE_URL`
+  - `NEXTAUTH_SECRET`
+  - `NEXTAUTH_URL`
+  - `STRAVA_CLIENT_ID`
+  - `STRAVA_CLIENT_SECRET`
+  - `STRAVA_WEBHOOK_VERIFY_TOKEN`
+
+### Database Setup
+
+- [ ] Install Prisma: `npm install prisma @prisma/client`
+- [ ] Initialize Prisma: `npx prisma init`
+- [ ] Provision PostgreSQL database (Supabase or Neon — both have free tiers)
+- [ ] Add `DATABASE_URL` to `.env.local`
+- [ ] Create empty initial schema in `prisma/schema.prisma` (datasource + generator only — models come in Phase 2)
+- [ ] Confirm Prisma connects: `npx prisma db push`
+
+### PWA Configuration
+
+- [ ] Install next-pwa: `npm install next-pwa`
+- [ ] Configure `next.config.ts` with PWA settings
+- [ ] Create `/public/manifest.json`:
+  
+  ```json
+  {
+    "name": "ES100 Coach",
+    "short_name": "ES100",
+    "description": "Eastern States 100 Training Coach",
+    "start_url": "/",
+    "display": "standalone",
+    "background_color": "#0a0a0a",
+    "theme_color": "#0a0a0a",
+    "icons": [
+      { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+      { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" }
+    ]
+  }
+  ```
+- [ ] Create app icons (192x192 and 512x512) and add to `/public/`
+- [ ] Add manifest link to root layout
+- [ ] Add meta viewport tag for mobile: `<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">`
+- [ ] Add `apple-mobile-web-app-capable` and `apple-mobile-web-app-status-bar-style` meta tags for iOS
+
+### shadcn/ui Setup
+
+- [ ] Initialize shadcn: `npx shadcn-ui@latest init`
+- [ ] Install initial components: `button`, `card`, `badge`, `progress`, `separator`
+- [ ] Confirm components render correctly
+
+### Shell UI
+
+- [ ] Create mobile-first root layout in `/src/app/layout.tsx`
+  - Max width constrained (mobile-first, not full-width desktop)
+  - Bottom navigation bar placeholder (Today / Week / Plan)
+  - Safe area insets for notched phones (`pb-safe`, `pt-safe`)
+- [ ] Create placeholder pages for each main route:
+  - `/dashboard` → “Today — coming soon”
+  - `/week` → “Week — coming soon”
+  - `/plan` → “Plan — coming soon”
+- [ ] Create a root `/` page that redirects to `/dashboard`
+
+### GitHub Setup
+
+- [ ] Create GitHub repository: `es100-coach`
+- [ ] Push initial commit to `main`
+- [ ] Protect `main` branch — require PR to merge
+- [ ] Create branch naming convention doc in README:
+  - `feature/phase-X-description`
+  - `fix/description`
+  - `chore/description`
+
+### Vercel Deployment
+
+- [ ] Connect GitHub repo to Vercel
+- [ ] Configure build settings (Next.js auto-detected)
+- [ ] Add all env vars to Vercel dashboard (use placeholder values for Strava until Phase 1)
+- [ ] Deploy to production — confirm live URL
+- [ ] Enable preview deployments for PRs
+- [ ] Confirm live URL is accessible on your phone browser
+- [ ] Install PWA to phone home screen from live URL — confirm it opens standalone
+
+-----
+
+## Definition of Done
+
+Phase 0 is complete when:
+
+- `npm run build` passes locally with no errors
+- App is live on Vercel at a real URL
+- PWA installs to phone home screen and opens standalone (no browser chrome)
+- Bottom nav renders on mobile
+- All three placeholder screens are reachable
+- GitHub repo is connected to Vercel with auto-deploy on push to main
+- Preview deployments work on open PRs
+
+-----
+
+## Notes
+
+- Do not add any feature logic in Phase 0 — shell only
+- Vercel deployment happens NOW, not later — webhook registration in Phase 4 requires a live URL
+- The PWA install test on your phone is a hard gate before proceeding to Phase 1
+
+-----
+
+*Next: Phase 1 — Authentication & Strava OAuth*
