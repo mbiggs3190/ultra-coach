@@ -1,0 +1,107 @@
+# Phase 3 — Strava Historical Import
+
+> **Goal**: Pull 12 months of Strava data on first login, calculate baseline fitness metrics, and trigger training plan generation. Runs once in the background — athlete should never wait for it.
+
+-----
+
+## Pre-Requisites
+
+- Phase 2 complete — full schema migrated
+- Strava auth working with valid access token
+
+-----
+
+## Checklist
+
+### Background Job Architecture
+
+- [ ] Create `/src/features/strava-sync/historical-import.ts` — main import orchestrator
+- [ ] Trigger automatically after first successful Strava OAuth (check `historicalImportDone === false`)
+- [ ] Run as a background process — do NOT block the UI
+- [ ] Use Vercel background functions or a queued approach (start with simple async, upgrade if needed)
+- [ ] Set `historicalImportDone = true` on `Athlete` when complete
+- [ ] Create import status endpoint: `GET /api/strava/import-status` → returns `{ status, progress, complete }`
+
+### Activity Fetch
+
+- [ ] Create `/src/lib/strava/fetch-activities.ts`
+- [ ] Fetch all activities from past 12 months:
+  
+  ```typescript
+  // Strava API: GET /athlete/activities
+  // params: after (Unix timestamp), per_page (max 200), page
+  // Paginate until empty page returned
+  const after = Math.floor(Date.now() / 1000) - (365 * 24 * 60 * 60)
+  ```
+- [ ] Handle pagination — loop until response is empty array
+- [ ] Filter to relevant sport types: `Run`, `TrailRun`, `Walk`, `Hike`, `WeightTraining`, `Workout`
+- [ ] Track progress: `{ fetched: N, total: estimated }`
+
+### Activity Detail Fetch
+
+- [ ] For each activity, fetch full detail: `GET /activities/{id}`
+- [ ] For each activity, fetch streams: `GET /activities/{id}/streams`
+  - Request streams: `heartrate,altitude,distance,grade_smooth`
+- [ ] Calculate `totalElevationLoss` from altitude stream (sum of all descents)
+- [ ] Calculate effort level from HR data:
+  - Easy: avg HR < 75% max HR
+  - Moderate: 75-87% max HR
+  - Hard: >87% max HR
+  - (Use 180 as default max HR if not set — athlete can override in settings)
+- [ ] Calculate `vertWeightedLoad` per activity
+- [ ] Store full Strava JSON in `rawStravaJson` for future use
+
+### Rate Limit Management
+
+- [ ] Create `/src/lib/strava/rate-limiter.ts`
+- [ ] Parse `X-RateLimit-Limit` and `X-RateLimit-Usage` headers from every Strava response
+- [ ] If usage > 150/200 in 15-min window, pause for remaining window time
+- [ ] If usage > 1800/2000 daily, pause until midnight
+- [ ] Log rate limit status throughout import
+- [ ] Build in 200ms delay between activity detail fetches (prevents burst)
+
+### Data Storage
+
+- [ ] Upsert each activity to `Activity` table (handle duplicates gracefully via `stravaId`)
+- [ ] Batch database writes — upsert in groups of 20 rather than one at a time
+- [ ] Handle Strava API errors per activity gracefully — log and continue, don’t abort full import
+
+### Baseline Calculation
+
+- [ ] Create `/src/features/strava-sync/calculate-baseline.ts`
+- [ ] Run after all activities stored
+- [ ] Calculate from most recent 8 weeks of data:
+  - [ ] `baselineWeeklyMiles` — average weekly distance
+  - [ ] `baselineWeeklyVert` — average weekly elevation gain (feet)
+  - [ ] `baselineDownhillVol` — average weekly elevation loss (feet)
+  - [ ] `baselineLongRun` — longest single run in past 12 weeks (miles)
+  - [ ] `baselineConsistency` — % of weeks with at least 3 activities
+  - [ ] Effort distribution — % of runs tagged easy/moderate/hard
+- [ ] Store all baseline values on `Athlete` record
+- [ ] Log baseline summary for debugging
+
+### UI Progress Indicator
+
+- [ ] Create `/src/components/ui/import-progress.tsx`
+- [ ] Show on dashboard if `historicalImportDone === false`
+- [ ] Poll import status every 3 seconds
+- [ ] Display: “Analyzing your training history… (N activities processed)”
+- [ ] On complete: dismiss and trigger plan generation notification
+
+-----
+
+## Definition of Done
+
+Phase 3 is complete when:
+
+- First login triggers background import automatically
+- All 12 months of activities stored in database
+- Elevation loss calculated from streams for trail/run activities
+- Baseline metrics stored on Athlete record
+- Progress indicator shows on dashboard during import
+- Import completes without rate limit errors
+
+-----
+
+*Previous: Phase 2 — Schema*
+*Next: Phase 4 — Strava Webhook*
