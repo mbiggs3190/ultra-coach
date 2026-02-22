@@ -1,0 +1,691 @@
+# Phase 4 — Strava Webhook (Live Sync)
+
+> **Goal**: Every run you complete automatically appears in the app within minutes of syncing to Strava. Zero manual steps.
+
+-----
+
+## Checklist
+
+### Webhook Endpoint
+
+- [ ] Create `/src/app/api/strava/webhook/route.ts`
+- [ ] Handle GET request — Strava sends this to validate the endpoint:
+  
+  ```typescript
+  // Strava sends: hub.mode, hub.verify_token, hub.challenge
+  // Respond with: { "hub.challenge": hub.challenge }
+  // Only if hub.verify_token matches STRAVA_WEBHOOK_VERIFY_TOKEN env var
+  ```
+- [ ] Handle POST request — Strava sends this when activity events occur:
+  
+  ```typescript
+  // Body shape: { object_type, aspect_type, object_id, owner_id, subscription_id, event_time }
+  // object_type: 'activity' or 'athlete'
+  // aspect_type: 'create', 'update', 'delete'
+  ```
+- [ ] Return 200 immediately on POST (Strava requires response within 2 seconds)
+- [ ] Process event asynchronously after returning 200
+
+### Event Handlers
+
+- [ ] `activity.create`: Fetch full activity detail from Strava, upsert to database, recalculate weekly targets
+- [ ] `activity.update`: Re-fetch activity and update database record
+- [ ] `activity.delete`: Set `isDeleted = true` on activity record
+- [ ] `athlete.deauthorize`: Clear athlete tokens from database (required by Strava API terms)
+
+### Webhook Event Log
+
+- [ ] Create `WebhookEvent` model in Prisma:
+  
+  ```prisma
+  model WebhookEvent {
+    id          String   @id @default(cuid())
+    stravaEventType String
+    objectId    BigInt
+    ownerId     BigInt
+    processedAt DateTime?
+    error       String?
+    rawPayload  Json
+    createdAt   DateTime @default(now())
+  }
+  ```
+- [ ] Log every incoming webhook event before processing
+- [ ] Mark as processed or log error after handling
+- [ ] Run migration: `npx prisma migrate dev --name add-webhook-events`
+
+### Webhook Registration
+
+- [ ] Deploy Phase 4 code to Vercel (webhook endpoint must be live before registering)
+- [ ] Register webhook subscription with Strava:
+  
+  ```bash
+  curl -X POST https://www.strava.com/api/v3/push_subscriptions \
+    -F client_id=YOUR_CLIENT_ID \
+    -F client_secret=YOUR_CLIENT_SECRET \
+    -F callback_url=https://your-app.vercel.app/api/strava/webhook \
+    -F verify_token=YOUR_VERIFY_TOKEN
+  ```
+- [ ] Confirm subscription created — Strava returns `{ id: N }`
+- [ ] Store subscription ID in Vercel env vars for reference
+
+### Integration Test
+
+- [ ] Record a short run on Coros watch
+- [ ] Confirm it syncs to Strava (check Strava app)
+- [ ] Confirm webhook fires (check WebhookEvent log in database)
+- [ ] Confirm activity appears in app database
+- [ ] Confirm weekly targets recalculate
+
+-----
+
+## Definition of Done
+
+Phase 4 is complete when:
+
+- Webhook endpoint validates correctly with Strava
+- Activity create/update/delete events all handled
+- Full pipeline tested: Coros run → Strava → webhook → database
+- Webhook events logged for debugging
+- Athlete deauthorize event handled (API terms compliance)
+
+-----
+
+*Previous: Phase 3 — Historical Import*
+*Next: Phase 5 — Training Plan Generation*
+
+-----
+
+-----
+
+# Phase 5 — Training Plan Generation
+
+> **Goal**: The coaching brain. Generates a complete plan from today to race day, calibrated to the athlete’s baseline, and adapts forward weeks based on actual training data.
+
+-----
+
+## Checklist
+
+### Phase Boundaries
+
+- [ ] Create `/src/features/training-plan/calculate-phases.ts`
+- [ ] Race date: August 8, 2026
+- [ ] From today (February 22, 2026) = approximately 24 weeks
+- [ ] Calculate phase start/end dates:
+  - Base: weeks 1–8 (now through ~mid-April)
+  - Build: weeks 9–16 (~mid-April through mid-June)
+  - Peak: weeks 17–20 (~mid-June through mid-July)
+  - Taper: weeks 21–24 (~mid-July through race day)
+- [ ] Adjust phase boundaries based on `baselineWeeklyMiles`:
+  - If baseline < 30 mpw → extend base phase by 1-2 weeks
+  - If baseline > 50 mpw → can shorten base phase by 1 week
+- [ ] Create `TrainingPhase` records for each phase
+
+### Weekly Target Generation
+
+- [ ] Create `WeeklyTarget` records for every week to race day
+- [ ] Base phase weekly targets:
+  - Mileage: build from baseline to ~baseline + 20% over 8 weeks
+  - Vert: minimum 2,000 ft/week, building to 5,000 ft
+  - Downhill: minimum 1,500 ft/week (track this separately from the start)
+  - Easy %: enforce 80% easy minimum
+- [ ] Build phase weekly targets:
+  - Mileage: peak at baseline + 40-50%
+  - Vert: 5,000-8,000 ft/week
+  - Downhill: 3,000-5,000 ft/week
+  - One quality session per week
+- [ ] Peak phase: maintain high vert, reduce overall volume slightly
+- [ ] Taper: volume drops 20% each week, vert maintained briefly then drops
+
+### Daily Workout Generation
+
+- [ ] Create `/src/features/training-plan/generate-workouts.ts`
+- [ ] Generate `PrescribedWorkout` for every day from today to race day
+- [ ] Weekly structure template (adapt to phase):
+  
+  ```
+  Monday:    Rest or easy walk
+  Tuesday:   Easy run (Pittsburgh hills or flat)
+  Wednesday: Workout day (phase-dependent) or strength
+  Thursday:  Easy run
+  Friday:    Strength or rest
+  Saturday:  Long run (primary weekly anchor)
+  Sunday:    Easy recovery run (back-to-back in Build phase)
+  ```
+- [ ] Pittsburgh terrain assignment:
+  - Easy days → flat riverfront route
+  - Uphill intervals → neighborhood hills / staircases
+  - Downhill repeats → dedicated downhill session, descent is the workout
+  - Long run → mixed terrain with vert target
+  - Treadmill → assigned for incline intervals in Base phase
+  - Weighted vest → assigned for incline walks
+  - Track → strides and controlled tempos
+
+### Workout Type Library
+
+- [ ] Create `/src/features/training-plan/workout-library.ts`
+- [ ] Define each workout type with coaching description (the “why” behind each session):
+  - `easy_run` — conversational effort, aerobic base development
+  - `long_run` — primary weekly stimulus, time on feet, vert accumulation
+  - `uphill_intervals` — 2-4 min reps, high effort, simulates ES100 climb character
+  - `downhill_repeats` — controlled descent at pace, quad-specific adaptation
+  - `back_to_back_long` — Saturday/Sunday pair, Sunday intentionally easy
+  - `strength` — single-leg focused, 2 sessions/week in base
+  - `track_strides` — 4-6 × 20 sec strides, almost every week regardless of phase
+  - `treadmill_incline` — 8-12% incline, aerobic climbing simulation
+  - `vest_walk` — 12lb vest, incline treadmill, eccentric preparation
+  - `rest` — mandatory, not optional
+  - `heat_protocol` — activates automatically in final 6 weeks
+
+### Adaptive Logic
+
+- [ ] Create `/src/features/training-plan/adapt-plan.ts`
+- [ ] Trigger recalculation every Sunday night after weekly data closes
+- [ ] Rules engine:
+  - [ ] If weekly vert actual < 70% of target → increase downhill sessions next week
+  - [ ] If easy day HR trending down over 4 weeks → aerobic base developing, can advance
+  - [ ] If missed week detected → redistribute load forward, never try to “make it up”
+  - [ ] If 2+ consecutive missed weeks → flag for athlete review, recalculate conservatively
+  - [ ] If easy run HR consistently above moderate threshold → flag “easy days too hard”
+  - [ ] NEVER auto-move `userModified: true` scheduled workouts
+  - [ ] NEVER add a workout to a day already marked as rest by athlete
+
+### Plan Recalculation Trigger
+
+- [ ] Expose server action: `recalculatePlan(athleteId)`
+- [ ] Called automatically every Sunday after weekly targets calculated
+- [ ] Also callable manually from settings page
+
+-----
+
+## Definition of Done
+
+Phase 5 is complete when:
+
+- Complete plan exists in database from today to August 8, 2026
+- Every day has a `PrescribedWorkout` and `ScheduledWorkout` record
+- Weekly targets set for every week
+- Adaptive logic recalculates forward weeks each Sunday
+- Coaching description explains the “why” for every session type
+- `userModified` flag respected — sticky sessions never auto-moved
+
+-----
+
+*Previous: Phase 4 — Webhook*
+*Next: Phase 6 — Competitive Intelligence*
+
+-----
+
+-----
+
+# Phase 6 — Competitive Intelligence Module
+
+> **Goal**: Bake historical winner data into the app as a reference layer that informs goal-setting and the predicted finish module.
+
+-----
+
+## Checklist
+
+### Data Models
+
+- [ ] Add `CompetitiveData` model to Prisma:
+  
+  ```prisma
+  model CompetitiveData {
+    id              String @id @default(cuid())
+    race            String // "ES100"
+    year            Int
+    winnersName     String
+    finishTimeMin   Int
+    conditions      String? // cool, normal, hot — inferred from time
+    cancelled       Boolean @default(false)
+    cancelReason    String?
+    notes           String?
+  }
+  ```
+- [ ] Run migration
+- [ ] Seed all historical winner data (from Phase 2 seed file)
+- [ ] Add 2024 with `cancelled: true, cancelReason: "Weather"`
+
+### Benchmark Calculations
+
+- [ ] Create `/src/features/competitive-intel/benchmarks.ts`
+- [ ] Calculate from historical data:
+  - `goodDayWinTime` — fastest non-CR winning time (Ryan Clifford 2022: 20:13)
+  - `normalDayWinTime` — median of all years (approximately 21:30)
+  - `hardDayWinTime` — slowest winning time (Reagan McCoy 2023: 22:24)
+  - `courseRecord` — Wesley Atkinson 2019: 18:23
+- [ ] Required moving pace for 20:30 goal: `(20.5 * 60) / 103 miles = ~11.9 min/mile moving pace`
+- [ ] Store benchmarks as constants in `/src/lib/constants/race.ts`
+
+### Course Profile Data
+
+- [ ] Create `/src/lib/constants/course-profile.ts`:
+  
+  ```typescript
+  export const ES100_COURSE = {
+    distanceMiles: 103,
+    elevationGainFt: 20000,
+    elevationLossFt: 20000,
+    avgClimbHeight: 1050,  // 900-1200ft per climb
+    technicalRating: 'high',
+    backHalfRisk: 'miles 60-80 on descents — primary DNF zone',
+    heatRisk: 'high — August in Pennsylvania, race cancelled in 2024',
+    targetMovingPaceMinPerMile: 11.9, // for 20:30 goal
+  }
+  ```
+
+### Goal Time Setting
+
+- [ ] Add goal time field to settings page (defaults to 20:30 / 1230 min)
+- [ ] Allow athlete to adjust — app recalculates benchmarks when changed
+- [ ] Show context when setting goal: “Based on historical results, sub-20:30 would win in most years”
+
+### Competitive Context UI Component
+
+- [ ] Create `/src/components/ui/competitive-context.tsx`
+- [ ] Shows on Plan screen:
+  - Course record: 18:23 (Wesley Atkinson, 2019)
+  - Historical winning range: 20:13 – 22:31
+  - Your goal: [athlete goal time]
+  - Required moving pace: X min/mile
+- [ ] Show historical results table (collapsible)
+
+-----
+
+## Definition of Done
+
+Phase 6 is complete when:
+
+- All historical winner data seeded and accessible
+- 2024 cancellation noted in data
+- Benchmark times calculated and stored as constants
+- Goal time visible and editable in settings
+- Competitive context component renders on Plan screen
+
+-----
+
+*Previous: Phase 5 — Training Plan*
+*Next: Phase 7 — Predicted Finish Time*
+
+-----
+
+-----
+
+# Phase 7 — Predicted Finish Time Module
+
+> **Goal**: A living predicted finish time that updates every Sunday based on actual training, shows three scenario ranges, and tracks the gap to your 20:30 goal.
+
+-----
+
+## Checklist
+
+### Prediction Engine
+
+- [ ] Create `/src/features/predicted-finish/prediction-engine.ts`
+- [ ] Input signals with weights (tune over time):
+  
+  ```typescript
+  const signals = {
+    longRunPerformance: 0.25,    // recent long run pace vs effort vs terrain
+    weeklyVertVsTarget: 0.20,    // actual vert / target vert, trailing 4 weeks
+    downhillVolume: 0.20,        // downhill feet accumulated vs target
+    consistency: 0.15,           // % of prescribed sessions completed
+    easyDayHRTrend: 0.10,        // HR on easy runs trending down = positive
+    weeklyMileageVsTarget: 0.10, // actual miles / target miles
+  }
+  ```
+- [ ] Baseline prediction: start from historical winning range midpoint (~21:20)
+- [ ] Adjust up or down based on weighted signal score
+- [ ] Calculate three scenarios:
+  - Good day: prediction × 0.92 (good conditions, everything clicks)
+  - Normal day: prediction (base estimate)
+  - Hard day: prediction × 1.10 (heat, back-half struggle)
+- [ ] Confidence score formula:
+  
+  ```typescript
+  const weeksOfData = Math.min(currentWeek, 20)
+  const confidence = weeksOfData / 20  // 0 at start, 1.0 at week 20
+  ```
+- [ ] Goal gap: `mostLikelyMinutes - goalMinutes` (negative = ahead of goal)
+- [ ] Goal gap trend: compare to previous week’s gap — improving/declining/stable
+- [ ] Store snapshot in `PredictedFinishTime` every Sunday
+
+### Long Run Performance Signal
+
+- [ ] Calculate from most recent 3 long runs:
+  - Grade-adjusted pace vs effort level
+  - Normalize for terrain and conditions
+  - Compare to what pace would produce goal finish time
+- [ ] Feed into prediction as primary signal
+
+### Weekly Recalculation
+
+- [ ] Create server action: `calculateWeeklyPrediction(athleteId)`
+- [ ] Trigger every Sunday after weekly targets are closed
+- [ ] Also trigger after historical import completes (initial prediction)
+- [ ] Store history — never overwrite, always insert new record
+
+### Prediction UI Widget
+
+- [ ] Create `/src/components/ui/predicted-finish-widget.tsx`
+- [ ] Primary display: most likely finish time (large, prominent)
+- [ ] Secondary: good day / hard day range
+- [ ] Goal gap indicator: “+ X min behind goal” or “- X min ahead of goal” with trend arrow
+- [ ] Confidence bar: shows how much data is behind the prediction
+- [ ] Tap to expand: show trend chart of prediction over time
+- [ ] Color coding: green (ahead of goal), yellow (within 1 hour), red (behind by >1 hour)
+
+### Prediction Trend Chart
+
+- [ ] Show weekly prediction history as a line chart
+- [ ] Three lines: good day, normal day, hard day
+- [ ] Horizontal reference line: goal time (20:30)
+- [ ] X-axis: weeks into build
+- [ ] Y-axis: finish time in hours
+
+-----
+
+## Definition of Done
+
+Phase 7 is complete when:
+
+- Prediction calculates correctly from real training data
+- Three scenario times display on dashboard
+- Goal gap shows with trend direction
+- Confidence score renders meaningfully
+- Weekly snapshot stored in database
+- Trend chart shows history of predictions
+- Widget updates within 24 hours of each Sunday
+
+-----
+
+*Previous: Phase 6 — Competitive Intelligence*
+*Next: Phase 8 — Mobile Dashboard UI*
+
+-----
+
+-----
+
+# Phase 8 — Mobile Dashboard UI
+
+> **Goal**: The three screens that tie everything together. Built for one-handed phone use first.
+
+-----
+
+## Checklist
+
+### Mobile Shell
+
+- [ ] Confirm root layout is mobile-first:
+  - Max width: 430px centered (iPhone Pro width)
+  - Bottom safe area padding for home indicator
+  - Top safe area padding for notch/dynamic island
+- [ ] Bottom navigation bar (fixed, above home indicator):
+  - Today (house icon)
+  - Week (calendar icon)
+  - Plan (map icon)
+- [ ] Active tab indicator
+- [ ] No header on Today screen — content starts at top
+
+### Today Screen (`/dashboard`)
+
+- [ ] **Hero section**: today’s prescribed workout
+  - Workout type badge (color-coded by type)
+  - Key targets: distance, vert, effort
+  - Coaching description (“why this session matters today”)
+  - Terrain recommendation (Pittsburgh-specific)
+- [ ] **Yesterday’s summary**: most recent activity from Strava sync
+  - Distance, vert, moving time
+  - Effort level tag (easy/moderate/hard)
+  - Flag if effort was higher than prescribed
+- [ ] **Coaching flags** (only show if triggered):
+  - “Easy runs are trending harder than prescribed — protect your aerobic base”
+  - “Weekly vert is behind target — consider adding hill work this week”
+  - “Great consistency this week — aerobic base is building”
+- [ ] **Predicted finish widget** (compact): most likely time + goal gap
+- [ ] Pull-to-refresh updates from latest Strava sync
+
+### Week Screen (`/week`)
+
+- [ ] 7-day week view (Monday–Sunday)
+- [ ] Each day shows: workout type, distance target, vert target
+- [ ] Color coding: completed (green), today (blue), upcoming (default), rest (gray)
+- [ ] **Plan vs Actual summary** at top:
+  - Miles: X / Y
+  - Vert: X / Y ft
+  - Downhill: X / Y ft
+  - Effort distribution: X% easy
+- [ ] **Workout swap interface**:
+  - Tap any future workout to select it
+  - Tap a second workout to initiate swap
+  - Confirm dialog: “Swap Tuesday easy run with Thursday workout?”
+  - On confirm: update `scheduledDate` on both records, set `userModified: true`, update `swappedWith` reference
+  - Swapped sessions show a small “↔” indicator
+- [ ] Sticky badge: show “🔒” on user-modified sessions so it’s clear they won’t auto-move
+
+### Plan Screen (`/plan`)
+
+- [ ] Scrollable calendar from today to August 8, 2026
+- [ ] Month headers as athlete scrolls
+- [ ] Phase banners: “BASE PHASE”, “BUILD PHASE”, etc.
+- [ ] Each day: small tile showing workout type icon and distance
+- [ ] Tap day → expand to show full workout detail
+- [ ] **Competitive context widget** (top of screen):
+  - Goal: 20:30
+  - Pace required: 11:54/mile moving average
+  - Race date countdown: “X weeks to Eastern States 100”
+- [ ] **Predicted finish widget** (full version with trend chart)
+- [ ] **Heat protocol banner**: appears automatically at 6-week mark
+
+### Coaching Flags System
+
+- [ ] Create `/src/features/training-plan/coaching-flags.ts`
+- [ ] Run after every activity sync and weekly recalculation
+- [ ] Flag types:
+  - `easy_too_hard` — easy run HR above moderate threshold
+  - `vert_behind` — actual vert < 70% of weekly target
+  - `downhill_behind` — downhill volume < 60% of target
+  - `inconsistency` — 2+ sessions missed in past week
+  - `great_consistency` — positive reinforcement flag
+  - `aerobic_improving` — easy day HR trend down over 4 weeks
+  - `taper_madness` — in taper phase, normalize the restlessness
+- [ ] Show maximum 2 flags at a time on Today screen (avoid noise)
+- [ ] Dismiss individual flags
+
+### Accessibility & Mobile Polish
+
+- [ ] All tap targets minimum 44×44pt
+- [ ] No hover-dependent interactions
+- [ ] Confirm all screens usable one-handed
+- [ ] Confirm PWA “Add to Home Screen” still works after all UI added
+- [ ] Test on both iOS Safari and Android Chrome
+- [ ] Confirm bottom nav doesn’t overlap content
+
+-----
+
+## Definition of Done
+
+Phase 8 is complete when:
+
+- All three screens render correctly on phone
+- Workout swap works and sets `userModified` flag
+- Predicted finish widget shows on Today and Plan screens
+- Coaching flags appear when triggered
+- PWA installs cleanly and all screens accessible from home screen icon
+- One-handed usability confirmed on actual phone
+
+-----
+
+*Previous: Phase 7 — Predicted Finish*
+*Next: Phase 9 — Strength & Auxiliary Training*
+
+-----
+
+-----
+
+# Phase 9 — Strength & Auxiliary Training
+
+> **Goal**: Overlay structured strength, weighted vest, and track sessions onto the existing plan framework.
+
+-----
+
+## Checklist
+
+### Strength Session Library
+
+- [ ] Create `/src/features/strength/session-library.ts`
+- [ ] Define ES100-specific strength movements:
+  
+  ```typescript
+  export const strengthMovements = {
+    primaryLower: [
+      { name: 'Bulgarian Split Squat', sets: 3, reps: '8-10 each', notes: 'Primary quad/glute builder' },
+      { name: 'Single-Leg Romanian Deadlift', sets: 3, reps: '10 each', notes: 'Posterior chain, ankle stability' },
+      { name: 'Step-Ups (weighted)', sets: 3, reps: '10 each', notes: 'Hiking/climb simulation' },
+      { name: 'Lateral Step-Down', sets: 3, reps: '10 each', notes: 'Eccentric quad control for descents' },
+    ],
+    hipStability: [
+      { name: 'Clamshells', sets: 3, reps: '15 each' },
+      { name: 'Side-Lying Hip Abduction', sets: 3, reps: '15 each' },
+      { name: 'Single-Leg Glute Bridge', sets: 3, reps: '12 each' },
+    ],
+    ankleStability: [
+      { name: 'Single-Leg Balance (eyes closed)', sets: 3, duration: '30 sec each' },
+      { name: 'Banded Ankle Circles', sets: 2, reps: '15 each direction' },
+    ],
+    core: [
+      { name: 'Dead Bug', sets: 3, reps: '8 each side' },
+      { name: 'Pallof Press', sets: 3, reps: '10 each side' },
+    ]
+  }
+  ```
+- [ ] Define two session templates:
+  - **Session A** (primary): Split squat + SL RDL + Step-up + Hip stability
+  - **Session B** (secondary): Lateral step-down + Ankle stability + Core
+
+### Strength Prescription Schedule
+
+- [ ] Base phase: 2 strength sessions per week (Session A + Session B)
+- [ ] Build phase: 2 sessions per week, reduce volume as running volume increases
+- [ ] Peak phase: 1 session per week, maintenance only
+- [ ] Taper: 1 brief session in first taper week, then none
+- [ ] Assign to `PrescribedWorkout` with `workoutType: 'strength'`
+
+### Weighted Vest Sessions
+
+- [ ] Prescription: treadmill incline walks at 10-12% grade with 12lb vest
+- [ ] Base phase: 1 session per week, 30-45 minutes
+- [ ] Assign to Fridays (low-impact day before Saturday long run)
+- [ ] Coaching note: “Simulates ES100 climb grade. Low-impact but high eccentric load — builds the hiking fitness that will matter at mile 60.”
+
+### Track Strides
+
+- [ ] Strides prescribed almost every week regardless of phase
+- [ ] Assign to easy run days — add 4-6 × 20 second strides at end of run
+- [ ] Coaching note: “Strides recruit fast-twitch fibers and improve running economy without meaningful fatigue. 20 seconds, not sprinting — controlled fast.”
+- [ ] Track access used for: controlled tempo efforts, heat exposure sessions (summer), strides
+
+### Strength UI
+
+- [ ] Strength sessions show on Today screen with exercise list
+- [ ] Each exercise shows sets/reps/notes inline
+- [ ] Simple “Mark Complete” button for strength sessions (no Strava sync needed)
+- [ ] Completion stored in database
+
+-----
+
+## Definition of Done
+
+Phase 9 is complete when:
+
+- Strength sessions appear in plan from first week
+- Exercise list visible for each strength session
+- Vest walk sessions assigned to plan
+- Strides noted on relevant easy run days
+- Manual completion tracking works for strength sessions
+
+-----
+
+*Previous: Phase 8 — Mobile UI*
+*Next: Phase 10 — Heat Protocol*
+
+-----
+
+-----
+
+# Phase 10 — Heat Protocol Module
+
+> **Goal**: Automatic heat acclimatization guidance activating 6 weeks before race day. Non-negotiable given ES100’s August timing and 2024 cancellation.
+
+-----
+
+## Checklist
+
+### Auto-Activation Logic
+
+- [ ] Create `/src/features/heat-protocol/index.ts`
+- [ ] Calculate activation date: `raceDate - 42 days = June 27, 2026`
+- [ ] Check on every dashboard load: if within 6 weeks of race, heat protocol is active
+- [ ] Add `heatProtocolActive` flag to app state
+
+### Heat Protocol Content
+
+- [ ] Create `/src/features/heat-protocol/protocol-content.ts`
+- [ ] Week-by-week guidance:
+  
+  **Weeks 6-5 before race (late June)**
+  - [ ] Sauna protocol: 20-30 min post-run sauna, 3-4×/week
+  - [ ] Timing: begin running in warmest part of day (10am-2pm) on easy days
+  - [ ] Hydration: start tracking daily fluid intake
+  - [ ] Coaching note: “ES100 has historically had brutal heat. The 2024 race was cancelled due to weather. Adaptation takes 10-14 days — start now.”
+  
+  **Weeks 4-3 before race (mid July)**
+  - [ ] Increase sauna sessions to 30-40 min if tolerated
+  - [ ] Run in heat deliberately on all easy days
+  - [ ] Salt intake guidance: increase electrolyte intake during training
+  - [ ] Practice race nutrition and hydration strategy in heat conditions
+  
+  **Weeks 2-1 before race (taper + race week)**
+  - [ ] Maintain some heat exposure (1-2 short easy runs in heat)
+  - [ ] Reduce sauna sessions — recovery priority now
+  - [ ] Final hydration strategy locked in
+  - [ ] Race day heat strategy: start conservative, protect miles 1-30
+
+### Heat Protocol UI
+
+- [ ] Create `/src/components/ui/heat-protocol-banner.tsx`
+- [ ] Banner appears at top of Plan screen when protocol active
+- [ ] Color: warm orange — visually distinct from rest of app
+- [ ] Shows current week’s heat focus
+- [ ] Tap to expand full protocol details
+- [ ] Daily heat tip on Today screen during active period
+
+### Calendar Integration
+
+- [ ] Flag heat protocol weeks on Plan screen calendar
+- [ ] Add “heat” tag to prescribed easy runs during active period
+- [ ] Show sauna sessions as optional auxiliary sessions (not scored against consistency)
+
+### Practical Pittsburgh Heat Training
+
+- [ ] Note: Pittsburgh summer humidity and heat is genuinely useful pre-adaptation
+- [ ] Suggest running Three Rivers Heritage Trail at midday (open, exposed, hot)
+- [ ] Track sessions in summer = additional heat exposure
+- [ ] Indoor treadmill runs don’t count for heat adaptation — get outside
+
+-----
+
+## Definition of Done
+
+Phase 10 is complete when:
+
+- Heat protocol auto-activates exactly 6 weeks before August 8
+- Week-by-week guidance surfaces on Today screen
+- Heat banner visible on Plan screen
+- Easy run days during protocol flagged with heat tag
+- Calendar shows heat protocol phase clearly
+
+-----
+
+*Previous: Phase 9 — Strength & Auxiliary Training*
+*Build complete. Ship it. Win Eastern States.*
