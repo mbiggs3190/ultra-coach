@@ -1,0 +1,164 @@
+# Phase 1 — Authentication & Strava OAuth
+
+> **Goal**: Secure Strava OAuth login that stores athlete credentials and protects all app routes. Nothing else in the app works without this.
+
+-----
+
+## Pre-Requisites
+
+- Phase 0 complete — app is live on Vercel with a real URL
+- Strava account exists (already confirmed)
+
+-----
+
+## Checklist
+
+### Strava App Registration
+
+- [ ] Go to strava.com/settings/api
+- [ ] Create new application:
+  - **Application Name**: ES100 Coach
+  - **Category**: Training
+  - **Website**: your Vercel URL (e.g. `https://es100-coach.vercel.app`)
+  - **Authorization Callback Domain**: your Vercel domain (no `https://`, no path)
+- [ ] Copy **Client ID** and **Client Secret**
+- [ ] Add both to Vercel environment variables
+- [ ] Add both to local `.env.local`
+- [ ] Generate a random string for `STRAVA_WEBHOOK_VERIFY_TOKEN` (used in Phase 4)
+  
+  ```bash
+  openssl rand -hex 32
+  ```
+
+### NextAuth.js Setup
+
+- [ ] Install NextAuth: `npm install next-auth`
+- [ ] Create `/src/app/api/auth/[...nextauth]/route.ts`
+- [ ] Configure Strava OAuth provider:
+  
+  ```typescript
+  // Strava requires these specific scopes for activity data
+  // read,activity:read_all — gives access to all activities including private
+  authorization: {
+    params: {
+      scope: 'read,activity:read_all',
+      approval_prompt: 'auto',
+    }
+  }
+  ```
+- [ ] Configure Prisma adapter for NextAuth: `npm install @auth/prisma-adapter`
+- [ ] Add NextAuth models to Prisma schema (Account, Session, User, VerificationToken)
+- [ ] Run migration: `npx prisma migrate dev --name add-nextauth-models`
+- [ ] Set `NEXTAUTH_SECRET` (generate: `openssl rand -hex 32`)
+- [ ] Set `NEXTAUTH_URL` to your Vercel production URL
+
+### Token Storage
+
+- [ ] Extend NextAuth session to include Strava-specific fields:
+  - `stravaAthleteId`
+  - `accessToken`
+  - `refreshToken`
+  - `expiresAt`
+- [ ] Create `Athlete` model in Prisma (see Phase 2 for full schema — add basic version now):
+  
+  ```prisma
+  model Athlete {
+    id              String   @id @default(cuid())
+    stravaId        Int      @unique
+    accessToken     String
+    refreshToken    String
+    tokenExpiresAt  DateTime
+    createdAt       DateTime @default(now())
+    updatedAt       DateTime @updatedAt
+  }
+  ```
+- [ ] On successful OAuth: upsert `Athlete` record with tokens
+- [ ] Confirm tokens are stored in database after first login
+
+### Token Refresh Logic
+
+- [ ] Create `/src/lib/strava/refresh-token.ts`
+- [ ] Logic: if `tokenExpiresAt` is within 10 minutes of now, refresh automatically
+- [ ] Strava refresh endpoint:
+  
+  ```
+  POST https://www.strava.com/oauth/token
+  grant_type=refresh_token
+  client_id=YOUR_ID
+  client_secret=YOUR_SECRET
+  refresh_token=CURRENT_REFRESH_TOKEN
+  ```
+- [ ] On refresh: update `accessToken`, `refreshToken`, `tokenExpiresAt` in database
+- [ ] Call refresh check at the start of any server action that uses the Strava API
+- [ ] Test: confirm app still works after 6 hours (token expiry window)
+
+### Route Protection
+
+- [ ] Create middleware at `/src/middleware.ts`
+- [ ] Protect all routes under `/(protected)/*`
+- [ ] Unauthenticated requests redirect to `/login`
+- [ ] Create `/src/app/login/page.tsx` with “Connect with Strava” button
+- [ ] Style login page — Strava brand guidelines require using their official “Connect with Strava” button/badge
+- [ ] Create `/src/app/auth/error/page.tsx` for auth error states
+
+### Athlete Profile
+
+- [ ] Create `/src/app/(protected)/settings/page.tsx`
+- [ ] Fetch athlete profile from Strava API: `GET /athlete`
+- [ ] Display: name, profile photo, location
+- [ ] Display: app connection status, last sync time
+- [ ] Create sign out button → calls `signOut()`, redirects to `/login`
+
+### Strava API Client
+
+- [ ] Create `/src/lib/strava/client.ts` — centralized Strava API wrapper
+  
+  ```typescript
+  // All Strava API calls go through this client
+  // Handles: base URL, auth headers, error handling, rate limit awareness
+  export async function stravaFetch(
+    path: string,
+    athleteId: string,
+    options?: RequestInit
+  ) { ... }
+  ```
+- [ ] Add basic error handling for common Strava error codes (401, 429, 500)
+- [ ] Add rate limit header parsing — log when approaching limits
+
+-----
+
+## Testing
+
+- [ ] Sign in with Strava on desktop — confirm redirect and token storage
+- [ ] Sign in with Strava on mobile browser — confirm full flow works on phone
+- [ ] Confirm unauthenticated visits to `/dashboard` redirect to `/login`
+- [ ] Confirm profile photo and name appear after login
+- [ ] Sign out — confirm session cleared and redirect to `/login`
+- [ ] Check database — confirm `Athlete` record created with tokens
+
+-----
+
+## Definition of Done
+
+Phase 1 is complete when:
+
+- Strava OAuth login works on both desktop and mobile
+- Athlete tokens are stored securely in the database
+- Token refresh logic is in place and tested
+- All protected routes redirect unauthenticated users to login
+- Athlete name and photo visible in settings page
+- Sign out works cleanly
+
+-----
+
+## Notes
+
+- Strava OAuth requires HTTPS — works automatically on Vercel, requires setup if testing localhost (use `ngrok` or Vercel preview URL)
+- The scope `activity:read_all` is required to see private activities — request it now to avoid re-auth later
+- Never log access tokens or refresh tokens, even in development
+- NextAuth handles CSRF protection automatically — don’t bypass it
+
+-----
+
+*Previous: Phase 0 — Foundation*
+*Next: Phase 2 — Database Schema*
