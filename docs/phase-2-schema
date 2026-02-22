@@ -1,0 +1,329 @@
+# Phase 2 — Database Schema
+
+> **Goal**: Define all data models before building any features. Changing schema later is painful — get it right here.
+
+-----
+
+## Pre-Requisites
+
+- Phase 1 complete — auth working, basic Athlete model exists
+- Prisma connected to database
+
+-----
+
+## Design Principles
+
+- Define TypeScript types alongside each model in `/src/lib/types/`
+- Every model gets `createdAt` and `updatedAt` timestamps
+- Use `cuid()` for primary keys (URL-safe, collision-resistant)
+- Foreign keys always reference by `String` ID (not raw Int)
+- Soft delete where data loss would be bad (activities, workouts)
+
+-----
+
+## Checklist
+
+### Athlete (extend from Phase 1)
+
+- [ ] Add to `Athlete` model:
+  
+  ```prisma
+  model Athlete {
+    id                  String    @id @default(cuid())
+    stravaId            Int       @unique
+    stravaUsername      String?
+    firstName           String?
+    lastName            String?
+    profilePhotoUrl     String?
+    city                String?
+    accessToken         String
+    refreshToken        String
+    tokenExpiresAt      DateTime
+    goalRaceDate        DateTime  @default(dbgenerated("'2026-08-08'::timestamp"))
+    goalFinishTimeMin   Int       @default(1230) // 20:30 in minutes
+    historicalImportDone Boolean  @default(false)
+    baselineWeeklyMiles Float?
+    baselineWeeklyVert  Float?
+    baselineDownhillVol Float?
+    baselineLongRun     Float?
+    baselineConsistency Float?    // 0-1 score, % of weeks with activity
+    createdAt           DateTime  @default(now())
+    updatedAt           DateTime  @updatedAt
+  
+    activities          Activity[]
+    trainingPhases      TrainingPhase[]
+    scheduledWorkouts   ScheduledWorkout[]
+    weeklyTargets       WeeklyTarget[]
+    predictedFinishes   PredictedFinishTime[]
+    trainingLoads       TrainingLoad[]
+  }
+  ```
+
+### Activity
+
+- [ ] Create `Activity` model — mirrors Strava activity data with ES100-specific additions:
+  
+  ```prisma
+  model Activity {
+    id                  String    @id @default(cuid())
+    stravaId            BigInt    @unique
+    athleteId           String
+    athlete             Athlete   @relation(fields: [athleteId], references: [id])
+    name                String
+    sportType           String    // Run, TrailRun, Walk, WeightTraining, etc.
+    startDate           DateTime
+    startDateLocal      DateTime
+    distance            Float     // meters
+    movingTime          Int       // seconds
+    elapsedTime         Int       // seconds
+    totalElevationGain  Float     // meters
+    totalElevationLoss  Float?    // meters — ES100-critical metric
+    elevHigh            Float?    // meters
+    elevLow             Float?    // meters
+    averageHeartrate    Float?
+    maxHeartrate        Float?
+    averageSpeed        Float?    // m/s
+    maxSpeed            Float?    // m/s
+    effortLevel         String?   // easy/moderate/hard — calculated, not from Strava
+    vertWeightedLoad    Float?    // calculated load score weighting vert heavily
+    trainerActivity     Boolean   @default(false)
+    isDeleted           Boolean   @default(false)
+    rawStravaJson       Json?     // store full Strava response for future use
+    createdAt           DateTime  @default(now())
+    updatedAt           DateTime  @updatedAt
+  
+    @@index([athleteId, startDate])
+    @@index([stravaId])
+  }
+  ```
+
+### TrainingPhase
+
+- [ ] Create `TrainingPhase` model:
+  
+  ```prisma
+  model TrainingPhase {
+    id                  String    @id @default(cuid())
+    athleteId           String
+    athlete             Athlete   @relation(fields: [athleteId], references: [id])
+    name                String    // Base, Build, Peak, Taper
+    startDate           DateTime
+    endDate             DateTime
+    weeklyMileageTarget Float
+    weeklyVertTarget    Float     // feet
+    weeklyDownhillTarget Float    // feet — tracked separately
+    description         String?
+    createdAt           DateTime  @default(now())
+    updatedAt           DateTime  @updatedAt
+  
+    prescribedWorkouts  PrescribedWorkout[]
+  }
+  ```
+
+### PrescribedWorkout
+
+- [ ] Create `PrescribedWorkout` model — what the algorithm thinks you should do:
+  
+  ```prisma
+  model PrescribedWorkout {
+    id                  String    @id @default(cuid())
+    phaseId             String
+    phase               TrainingPhase @relation(fields: [phaseId], references: [id])
+    date                DateTime
+    workoutType         String    // easy_run, long_run, uphill_intervals, downhill_repeats,
+                                  // back_to_back_long, strength, track_strides, treadmill_incline,
+                                  // vest_walk, rest, heat_protocol
+    terrain             String?   // flat, hills, treadmill, track, stairs
+    targetDistance      Float?    // miles
+    targetVert          Float?    // feet gain
+    targetDownhill      Float?    // feet loss
+    effortLevel         String    // easy, moderate, hard
+    durationMinutes     Int?
+    description         String    // coaching note explaining WHY this session exists
+    isRestDay           Boolean   @default(false)
+    createdAt           DateTime  @default(now())
+    updatedAt           DateTime  @updatedAt
+  
+    scheduledWorkout    ScheduledWorkout?
+  }
+  ```
+
+### ScheduledWorkout
+
+- [ ] Create `ScheduledWorkout` model — what you’ve actually committed to on a given day:
+  
+  ```prisma
+  model ScheduledWorkout {
+    id                    String    @id @default(cuid())
+    athleteId             String
+    athlete               Athlete   @relation(fields: [athleteId], references: [id])
+    prescribedWorkoutId   String    @unique
+    prescribedWorkout     PrescribedWorkout @relation(fields: [prescribedWorkoutId], references: [id])
+    scheduledDate         DateTime  // may differ from prescribed date after swap
+    userModified          Boolean   @default(false) // sticky flag — algorithm won't move this
+    swappedWithId         String?   // ID of the ScheduledWorkout this was swapped with
+    completedActivityId   String?   // ID of Activity that fulfilled this workout
+    createdAt             DateTime  @default(now())
+    updatedAt             DateTime  @updatedAt
+  
+    @@index([athleteId, scheduledDate])
+  }
+  ```
+
+### WeeklyTarget
+
+- [ ] Create `WeeklyTarget` model:
+  
+  ```prisma
+  model WeeklyTarget {
+    id                  String    @id @default(cuid())
+    athleteId           String
+    athlete             Athlete   @relation(fields: [athleteId], references: [id])
+    weekStartDate       DateTime  // always Monday
+    targetMileage       Float
+    targetVert          Float     // feet gain
+    targetDownhill      Float     // feet loss
+    targetEasyPct       Float     // % of runs that should be easy effort (target: ~80%)
+    actualMileage       Float?    // filled in as week completes
+    actualVert          Float?
+    actualDownhill      Float?
+    actualEasyPct       Float?
+    createdAt           DateTime  @default(now())
+    updatedAt           DateTime  @updatedAt
+  
+    @@unique([athleteId, weekStartDate])
+    @@index([athleteId, weekStartDate])
+  }
+  ```
+
+### PredictedFinishTime
+
+- [ ] Create `PredictedFinishTime` model:
+  
+  ```prisma
+  model PredictedFinishTime {
+    id                  String    @id @default(cuid())
+    athleteId           String
+    athlete             Athlete   @relation(fields: [athleteId], references: [id])
+    calculatedAt        DateTime  @default(now())
+    goodDayMinutes      Int       // optimistic scenario finish time in minutes
+    normalDayMinutes    Int       // typical conditions finish time
+    hardDayMinutes      Int       // hot/difficult conditions finish time
+    mostLikelyMinutes   Int       // central estimate
+    confidenceScore     Float     // 0-1, low early in build, high near race day
+    goalGapMinutes      Int       // difference between mostLikely and goal (negative = ahead of goal)
+    goalGapTrend        String    // improving, declining, stable
+    weeksOfData         Int       // how many weeks of training data informed this
+    createdAt           DateTime  @default(now())
+  
+    @@index([athleteId, calculatedAt])
+  }
+  ```
+
+### TrainingLoad
+
+- [ ] Create `TrainingLoad` model:
+  
+  ```prisma
+  model TrainingLoad {
+    id                    String    @id @default(cuid())
+    athleteId             String
+    athlete               Athlete   @relation(fields: [athleteId], references: [id])
+    weekStartDate         DateTime
+    rawLoad               Float     // mileage-based load
+    vertWeightedLoad      Float     // load with vert factored heavily
+    downhillLoad          Float     // downhill-specific load metric
+    rollingFourWeekLoad   Float?    // 4-week rolling average
+    hrTrend               Float?    // avg easy run HR trend (down = aerobic improvement)
+    consistencyScore      Float     // 0-1, % of planned sessions completed
+    createdAt             DateTime  @default(now())
+    updatedAt             DateTime  @updatedAt
+  
+    @@unique([athleteId, weekStartDate])
+  }
+  ```
+
+### Seed Data
+
+- [ ] Create `/prisma/seed/competitive-data.ts`:
+  
+  ```typescript
+  // Historical ES100 men's winner data
+  export const es100Winners = [
+    { year: 2025, winner: 'Michael Busada', finishTimeMin: 1350 }, // 22:30
+    { year: 2023, winner: 'Reagan McCoy', finishTimeMin: 1344 },   // 22:24
+    { year: 2022, winner: 'Ryan Clifford', finishTimeMin: 1213 },  // 20:13
+    { year: 2021, winner: 'Ben Quatromoni', finishTimeMin: 1351 }, // 22:31
+    { year: 2019, winner: 'Wesley Atkinson', finishTimeMin: 1104 }, // 18:23 CR
+    { year: 2017, winner: 'Jayson Kolb', finishTimeMin: 1273 },    // 21:13
+    { year: 2016, winner: 'Devon Olson', finishTimeMin: 1230 },    // 20:30
+    { year: 2015, winner: 'Michael Wardian', finishTimeMin: 1281 }, // 21:21
+    { year: 2014, winner: 'Ryan Welts', finishTimeMin: 1290 },     // 21:30
+    // Note: 2024 cancelled due to weather
+    // Note: 2018 and 2020 results TBD
+  ]
+  ```
+- [ ] Create `/prisma/seed/course-data.ts`:
+  
+  ```typescript
+  export const courseProfile = {
+    distanceMiles: 103,
+    elevationGainFt: 20000,
+    elevationLossFt: 20000,
+    finishRateAvg: 0.49,
+    finishRateHotYear: 0.30,
+    raceDate2026: '2026-08-08',
+    keyCharacteristics: [
+      'Punchy short-to-medium climbs (900-1200ft each), not sustained grades',
+      'Technical rocky Pennsylvania singletrack',
+      'Quad-destroying descents in back half (miles 60-80)',
+      'August heat and humidity — non-negotiable factor',
+    ],
+    goalTimeBenchmarks: {
+      courseRecord: 1104,  // 18:23 Wesley Atkinson 2019
+      winningRangeGoodDay: 1213,   // ~20:13 (2022 winner, likely cooler year)
+      winningRangeNormalDay: 1350, // ~22:30 (2021, 2023, 2025 winners)
+      targetWinTime: 1230, // 20:30 — our goal anchor
+    }
+  }
+  ```
+- [ ] Configure `prisma/seed.ts` to run seed files
+- [ ] Add seed script to `package.json`: `"seed": "tsx prisma/seed.ts"`
+- [ ] Run migration: `npx prisma migrate dev --name full-schema`
+- [ ] Run seed: `npm run seed`
+- [ ] Confirm all tables exist in database with correct columns
+
+### TypeScript Types
+
+- [ ] Create `/src/lib/types/athlete.ts`
+- [ ] Create `/src/lib/types/activity.ts`
+- [ ] Create `/src/lib/types/training-plan.ts`
+- [ ] Create `/src/lib/types/predicted-finish.ts`
+- [ ] Each file exports typed interfaces matching Prisma models + any UI-specific derived types
+
+-----
+
+## Definition of Done
+
+Phase 2 is complete when:
+
+- All models exist in `schema.prisma`
+- Migration runs cleanly: `npx prisma migrate dev`
+- Seed data populates competitive intelligence tables
+- Prisma Studio (`npx prisma studio`) shows all tables with correct columns
+- TypeScript types defined for every model
+- `npm run build` still passes
+
+-----
+
+## Notes
+
+- `totalElevationLoss` is not a standard Strava field — it must be calculated from the activity streams endpoint (Phase 3). Mark nullable for now.
+- `vertWeightedLoad` formula: `(miles × 1.0) + (vertGainFt / 1000 × 0.75) + (vertLossFt / 1000 × 0.5)` — adjust weights based on athlete feedback
+- The `userModified` flag on `ScheduledWorkout` is critical for the swap feature — never let the adaptive logic overwrite a `userModified: true` record
+- Store `rawStravaJson` on Activity now even if you don’t use it — Strava data is rich and you’ll want it later
+
+-----
+
+*Previous: Phase 1 — Authentication*
+*Next: Phase 3 — Historical Import*
